@@ -144,6 +144,44 @@ int knet_last_error(void) {
 }
 
 /* =======================================================================
+   Non-blocking helpers
+   ======================================================================= */
+
+/* (int) -> int — set O_NONBLOCK on fd, returns 0 or -1 */
+int knet_set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) { last_errno = errno; return -1; }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        last_errno = errno; return -1;
+    }
+    return 0;
+}
+
+/* (int, int) -> int — poll fd for readability
+   Returns 1 if ready, 0 if timeout, -1 on error */
+int knet_poll_read(int fd, int timeout_ms) {
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int rc = poll(&pfd, 1, timeout_ms);
+    if (rc < 0) { last_errno = errno; return -1; }
+    if (rc == 0) return 0;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+    return 1;
+}
+
+/* (int) -> int — non-blocking accept, returns fd, -2 for EAGAIN, -1 for error */
+int knet_nb_accept(int listen_fd) {
+    int fd = accept(listen_fd, NULL, NULL);
+    if (fd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return -2;
+        last_errno = errno;
+        return -1;
+    }
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    return fd;
+}
+
+/* =======================================================================
    TLS (OpenSSL)
    ======================================================================= */
 

@@ -2,7 +2,8 @@
   (import (scheme base) (kaappi ffi))
   (export tcp-connect tcp-listen tcp-accept
           tcp-send tcp-recv tcp-close tcp-last-error
-          tls-connect tls-send tls-recv tls-close)
+          tls-connect tls-send tls-recv tls-close
+          set-nonblocking poll-read nb-accept)
   (begin
 
     (define %lib (ffi-open "libkaappi_net"))
@@ -58,6 +59,22 @@
         (if (< rc 0) (error "tcp-close failed" (%last-error)) rc)))
 
     (define (tcp-last-error) (%last-error))
+
+    ;; --- Non-blocking API ---
+
+    (define %set-nonblocking (ffi-fn %lib "knet_set_nonblocking" '(int) 'int))
+    (define %poll-read       (ffi-fn %lib "knet_poll_read" '(int int) 'int))
+    (define %nb-accept       (ffi-fn %lib "knet_nb_accept" '(int) 'int))
+
+    (define (set-nonblocking fd)
+      (let ((rc (%set-nonblocking fd)))
+        (if (< rc 0) (error "set-nonblocking failed" (%last-error)) rc)))
+
+    (define (poll-read fd timeout-ms)
+      (%poll-read fd timeout-ms))
+
+    (define (nb-accept listen-fd)
+      (%nb-accept listen-fd))
 
     ;; --- TLS API ---
 
