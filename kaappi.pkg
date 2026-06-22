@@ -1,2 +1,3 @@
 name: kaappi-net
 build: make
+kaappi-version: >=0.1.0
