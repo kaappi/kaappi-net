@@ -8,7 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -17,24 +21,26 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev
 
       - name: Build Kaappi
         run: |
           git clone --depth 1 https://github.com/kaappi/kaappi.git /tmp/kaappi
-          cd /tmp/kaappi && zig build -Doptimize=ReleaseSafe
+          cd /tmp/kaappi && zig build
 
       - name: Build native library
         run: make
 
       - name: Run tests
-        run: |
-          export LD_LIBRARY_PATH=.
-          /tmp/kaappi/zig-out/bin/kaappi --coverage-xml coverage.xml --lib-path lib tests/test-tcp.scm
+        run: /tmp/kaappi/zig-out/bin/kaappi --coverage-xml coverage.xml --lib-path lib tests/test-tcp.scm
+        env:
+          LD_LIBRARY_PATH: .
+          DYLD_LIBRARY_PATH: .
 
       - name: Upload to Codecov
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && matrix.os == 'ubuntu-latest'
         uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
