@@ -1,5 +1,5 @@
 (define-library (kaappi net)
-  (import (scheme base) (srfi 18) (kaappi ffi))
+  (import (scheme base) (kaappi fibers) (kaappi ffi))
   (export tcp-connect tcp-listen tcp-accept
           tcp-send tcp-recv tcp-close tcp-last-error
           tls-connect tls-send tls-recv tls-close
@@ -88,19 +88,30 @@
     ;; (knet_tls_connect_start). Handshake/send/recv can each ask for
     ;; either direction (SSL_ERROR_WANT_READ/WANT_WRITE — renegotiation
     ;; means a "recv" can legitimately want to write and vice versa), so
-    ;; every retry polls whichever direction the sentinel names, then
-    ;; parks via thread-sleep! between attempts. thread-sleep! yields to
-    ;; the fiber scheduler when one exists (KEP-0001) and degrades to a
-    ;; plain sleep for sequential programs, so this loop is transparent
-    ;; to existing callers on both the fiber and non-fiber path.
+    ;; every retry polls whichever direction the sentinel names for a
+    ;; short bounded slice (%tls-poll-timeout-ms), then calls (yield) so
+    ;; an already-ready sibling fiber gets a turn before the next attempt.
+    ;;
+    ;; (yield), not thread-sleep!, is what makes this safe under
+    ;; concurrent fibers: thread-sleep! always drives the scheduler via a
+    ;; nested runSchedulerStep/runUntil call regardless of the calling
+    ;; fiber's context, so two fibers each retrying through many short
+    ;; waits pile up that many nested native stack frames (each only
+    ;; unwinds once its own timer fires) instead of the flat suspend/
+    ;; resume waitForFd uses for other blocking I/O — under load this
+    ;; shows up as multi-second stalls, not a clean hang. yield sets a
+    ;; flag the *existing* dispatch loop checks, so it returns up through
+    ;; one frame instead of recursing into a new one. Filed as a kaappi
+    ;; core follow-up; until it lands, avoid thread-sleep! in any retry
+    ;; loop a spawned fiber can re-enter many times.
 
-    (define %tls-poll-interval 0.001)
+    (define %tls-poll-timeout-ms 1)
 
     (define (%tls-await fd rc)
-      (let ((ready (if (= rc -2) (poll-read fd 0) (poll-write fd 0))))
+      (let ((ready (if (= rc -2) (poll-read fd %tls-poll-timeout-ms) (poll-write fd %tls-poll-timeout-ms))))
         (cond
           ((= ready 1) #t)
-          ((= ready 0) (thread-sleep! %tls-poll-interval) #f)
+          ((= ready 0) (yield) #f)
           (else (error "tls poll failed" (%last-error))))))
 
     (define (tls-connect host port . args)

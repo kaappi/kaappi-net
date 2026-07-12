@@ -158,23 +158,41 @@ int knet_set_nonblocking(int fd) {
 }
 
 /* (int, int) -> int — poll fd for readability
-   Returns 1 if ready, 0 if timeout, -1 on error */
+   Returns 1 if ready, 0 if timeout, -1 on error. Retries on EINTR: with
+   timeout_ms == 0 a signal essentially never lands mid-syscall, but a
+   nonzero (blocking) timeout gives it a real window, and every existing
+   caller here polls with a timeout appropriate to being retried by the
+   caller anyway. Checks POLLIN before POLLHUP/POLLERR: a peer that sends
+   a final response and closes in the same instant (HTTP Connection:
+   close) sets both, and there's still unread data sitting in the socket
+   buffer — treating that as a hard error drops the response. Only a
+   hangup/error with *no* pending data is a real "never becomes readable"
+   condition. */
 int knet_poll_read(int fd, int timeout_ms) {
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
-    int rc = poll(&pfd, 1, timeout_ms);
+    int rc;
+    do {
+        rc = poll(&pfd, 1, timeout_ms);
+    } while (rc < 0 && errno == EINTR);
     if (rc < 0) { last_errno = errno; return -1; }
     if (rc == 0) return 0;
+    if (pfd.revents & POLLIN) return 1;
     if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
     return 1;
 }
 
 /* (int, int) -> int — poll fd for writability
-   Returns 1 if ready, 0 if timeout, -1 on error */
+   Returns 1 if ready, 0 if timeout, -1 on error. See knet_poll_read for
+   why EINTR is retried and POLLOUT is checked before POLLHUP/POLLERR. */
 int knet_poll_write(int fd, int timeout_ms) {
     struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-    int rc = poll(&pfd, 1, timeout_ms);
+    int rc;
+    do {
+        rc = poll(&pfd, 1, timeout_ms);
+    } while (rc < 0 && errno == EINTR);
     if (rc < 0) { last_errno = errno; return -1; }
     if (rc == 0) return 0;
+    if (pfd.revents & POLLOUT) return 1;
     if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
     return 1;
 }
