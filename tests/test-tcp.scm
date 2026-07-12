@@ -97,6 +97,12 @@
       (let ((rc (poll-read server-fd 100)))
         (check "poll-read data ready" 1 rc))
 
+      ;; poll-write on an open, non-full socket is immediately writable
+      (let ((rc (poll-write client-fd 100)))
+        (check "poll-write ready" 1 rc))
+      (let ((rc (poll-write server-fd 100)))
+        (check "poll-write ready" 1 rc))
+
       (let ((buf (make-bytevector 64 0)))
         (let ((n (tcp-recv server-fd buf 64)))
           (check "async recv" 5 n)
