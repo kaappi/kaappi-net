@@ -158,23 +158,41 @@ int knet_set_nonblocking(int fd) {
 }
 
 /* (int, int) -> int — poll fd for readability
-   Returns 1 if ready, 0 if timeout, -1 on error */
+   Returns 1 if ready, 0 if timeout, -1 on error. Retries on EINTR: with
+   timeout_ms == 0 a signal essentially never lands mid-syscall, but a
+   nonzero (blocking) timeout gives it a real window, and every existing
+   caller here polls with a timeout appropriate to being retried by the
+   caller anyway. Checks POLLIN before POLLHUP/POLLERR: a peer that sends
+   a final response and closes in the same instant (HTTP Connection:
+   close) sets both, and there's still unread data sitting in the socket
+   buffer — treating that as a hard error drops the response. Only a
+   hangup/error with *no* pending data is a real "never becomes readable"
+   condition. */
 int knet_poll_read(int fd, int timeout_ms) {
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
-    int rc = poll(&pfd, 1, timeout_ms);
+    int rc;
+    do {
+        rc = poll(&pfd, 1, timeout_ms);
+    } while (rc < 0 && errno == EINTR);
     if (rc < 0) { last_errno = errno; return -1; }
     if (rc == 0) return 0;
+    if (pfd.revents & POLLIN) return 1;
     if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
     return 1;
 }
 
 /* (int, int) -> int — poll fd for writability
-   Returns 1 if ready, 0 if timeout, -1 on error */
+   Returns 1 if ready, 0 if timeout, -1 on error. See knet_poll_read for
+   why EINTR is retried and POLLOUT is checked before POLLHUP/POLLERR. */
 int knet_poll_write(int fd, int timeout_ms) {
     struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-    int rc = poll(&pfd, 1, timeout_ms);
+    int rc;
+    do {
+        rc = poll(&pfd, 1, timeout_ms);
+    } while (rc < 0 && errno == EINTR);
     if (rc < 0) { last_errno = errno; return -1; }
     if (rc == 0) return 0;
+    if (pfd.revents & POLLOUT) return 1;
     if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
     return 1;
 }
@@ -194,6 +212,20 @@ int knet_nb_accept(int listen_fd) {
 
 /* =======================================================================
    TLS (OpenSSL)
+
+   Non-blocking convention shared by knet_tls_handshake/send/recv, mirroring
+   knet_nb_accept's -1 (error) / -2 (EAGAIN) precedent but split into two
+   directions since OpenSSL's record layer can ask for the *opposite*
+   direction mid-operation (renegotiation):
+     >=1  bytes transferred (send/recv) or handshake complete
+      0   clean shutdown (recv only)
+     -1   hard error (last_errno holds an SSL_get_error() code)
+     -2   would block on read  — caller polls read-readiness and retries
+     -3   would block on write — caller polls write-readiness and retries
+   The underlying fd is set non-blocking as soon as it exists (right after
+   knet_tcp_connect) so the caller (lib/kaappi/net.sld) can drive the
+   handshake/send/recv loop via poll-read/poll-write + thread-sleep!,
+   yielding the fiber scheduler instead of blocking the OS thread.
    ======================================================================= */
 
 static void tls_init(void) {
@@ -209,39 +241,61 @@ void knet_tls_set_host(const char *host) {
     tls_host[sizeof(tls_host) - 1] = '\0';
 }
 
-/* (long, long) -> pointer */
-void *knet_tls_connect(long port, long timeout_ms) {
+static int knet_tls_classify(SSL *ssl, int rc) {
+    int err = SSL_get_error(ssl, rc);
+    if (err == SSL_ERROR_WANT_READ) return -2;
+    if (err == SSL_ERROR_WANT_WRITE) return -3;
+    last_errno = err;
+    return -1;
+}
+
+/* (long, long) -> pointer — opens the TCP connection and creates (but does
+   not complete) the SSL object; the handshake itself is driven step-wise
+   by knet_tls_handshake so it never blocks the OS thread. */
+void *knet_tls_connect_start(long port, long timeout_ms) {
     tls_init();
     int fd = knet_tcp_connect(tls_host, (int)port, (int)timeout_ms);
     if (fd < 0) return NULL;
+    knet_set_nonblocking(fd);
 
     SSL *ssl = SSL_new(tls_ctx);
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, tls_host);
     SSL_set1_host(ssl, tls_host);
-
-    if (SSL_connect(ssl) != 1) {
-        last_errno = (int)ERR_get_error();
-        SSL_free(ssl);
-        close(fd);
-        return NULL;
-    }
     return ssl;
+}
+
+/* (pointer) -> int — advances the handshake by one non-blocking step.
+   1 = complete, -2/-3 = would block (poll then retry), -1 = failed. */
+int knet_tls_handshake(void *ssl_ptr) {
+    SSL *ssl = (SSL *)ssl_ptr;
+    int rc = SSL_connect(ssl);
+    if (rc == 1) return 1;
+    return knet_tls_classify(ssl, rc);
+}
+
+/* (pointer) -> int — the underlying fd, so the caller can poll it. */
+int knet_tls_get_fd(void *ssl_ptr) {
+    return SSL_get_fd((SSL *)ssl_ptr);
 }
 
 /* (pointer, pointer, long) -> int */
 int knet_tls_send(void *buf, void *ssl_ptr, long len) {
-    int n = SSL_write((SSL *)ssl_ptr, buf, (int)len);
-    if (n <= 0) { last_errno = SSL_get_error((SSL *)ssl_ptr, n); return -1; }
+    SSL *ssl = (SSL *)ssl_ptr;
+    int n = SSL_write(ssl, buf, (int)len);
+    if (n <= 0) return knet_tls_classify(ssl, n);
     return n;
 }
 
 /* (pointer, pointer, long) -> int */
 int knet_tls_recv(void *buf, void *ssl_ptr, long len) {
-    int n = SSL_read((SSL *)ssl_ptr, buf, (int)len);
+    SSL *ssl = (SSL *)ssl_ptr;
+    int n = SSL_read(ssl, buf, (int)len);
     if (n <= 0) {
-        int err = SSL_get_error((SSL *)ssl_ptr, n);
+        int err = SSL_get_error(ssl, n);
         if (err == SSL_ERROR_ZERO_RETURN) return 0;
+        if (err == SSL_ERROR_WANT_READ) return -2;
+        if (err == SSL_ERROR_WANT_WRITE) return -3;
         last_errno = err;
         return -1;
     }

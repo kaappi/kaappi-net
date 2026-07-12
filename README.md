@@ -74,6 +74,13 @@ kaappi --lib-path /path/to/kaappi-net/lib your-script.scm
 | `(tls-recv ssl buf len)` | Receive over TLS |
 | `(tls-close ssl)` | Shutdown TLS + close socket |
 
+`tls-connect`/`tls-send`/`tls-recv` run the underlying socket non-blocking
+and retry internally on `SSL_ERROR_WANT_READ`/`WANT_WRITE`, parking on
+`thread-sleep!` between attempts. In a program that uses `(kaappi fibers)`
+this yields to the fiber scheduler, so a slow TLS handshake or response
+doesn't block sibling fibers; sequential programs see identical behavior
+to a plain blocking call.
+
 ### Error
 
 | Procedure | Description |
