@@ -1,5 +1,5 @@
 (define-library (kaappi net)
-  (import (scheme base) (kaappi ffi))
+  (import (scheme base) (srfi 18) (kaappi ffi))
   (export tcp-connect tcp-listen tcp-accept
           tcp-send tcp-recv tcp-close tcp-last-error
           tls-connect tls-send tls-recv tls-close
@@ -19,7 +19,9 @@
 
     ;; TLS
     (define %tls-set-host (ffi-fn %lib "knet_tls_set_host" '(string) 'void))
-    (define %tls-connect  (ffi-fn %lib "knet_tls_connect" '(long long) 'pointer))
+    (define %tls-connect-start (ffi-fn %lib "knet_tls_connect_start" '(long long) 'pointer))
+    (define %tls-handshake (ffi-fn %lib "knet_tls_handshake" '(pointer) 'int))
+    (define %tls-get-fd   (ffi-fn %lib "knet_tls_get_fd" '(pointer) 'int))
     (define %tls-send     (ffi-fn %lib "knet_tls_send" '(pointer pointer long) 'int))
     (define %tls-recv     (ffi-fn %lib "knet_tls_recv" '(pointer pointer long) 'int))
     (define %tls-close    (ffi-fn %lib "knet_tls_close" '(pointer) 'void))
@@ -81,22 +83,61 @@
       (%nb-accept listen-fd))
 
     ;; --- TLS API ---
+    ;;
+    ;; The underlying fd is non-blocking from the moment it's created
+    ;; (knet_tls_connect_start). Handshake/send/recv can each ask for
+    ;; either direction (SSL_ERROR_WANT_READ/WANT_WRITE — renegotiation
+    ;; means a "recv" can legitimately want to write and vice versa), so
+    ;; every retry polls whichever direction the sentinel names, then
+    ;; parks via thread-sleep! between attempts. thread-sleep! yields to
+    ;; the fiber scheduler when one exists (KEP-0001) and degrades to a
+    ;; plain sleep for sequential programs, so this loop is transparent
+    ;; to existing callers on both the fiber and non-fiber path.
+
+    (define %tls-poll-interval 0.001)
+
+    (define (%tls-await fd rc)
+      (let ((ready (if (= rc -2) (poll-read fd 0) (poll-write fd 0))))
+        (cond
+          ((= ready 1) #t)
+          ((= ready 0) (thread-sleep! %tls-poll-interval) #f)
+          (else (error "tls poll failed" (%last-error))))))
 
     (define (tls-connect host port . args)
       (let ((timeout (if (pair? args) (car args) 5000)))
         (%tls-set-host host)
-        (let ((ssl (%tls-connect port timeout)))
+        (let ((ssl (%tls-connect-start port timeout)))
           (if (= ssl 0)
               (error "tls-connect failed" host port (%last-error))
-              ssl))))
+              (let ((fd (%tls-get-fd ssl)))
+                (let loop ()
+                  (let ((rc (%tls-handshake ssl)))
+                    (cond
+                      ((= rc 1) ssl)
+                      ((< rc -1)
+                       (%tls-await fd rc)
+                       (loop))
+                      (else
+                       (%tls-close ssl)
+                       (error "tls-connect failed" host port (%last-error)))))))))))
 
     (define (tls-send ssl buf len)
-      (let ((n (%tls-send buf ssl len)))
-        (if (< n 0) (error "tls-send failed" (%last-error)) n)))
+      (let ((fd (%tls-get-fd ssl)))
+        (let loop ()
+          (let ((n (%tls-send buf ssl len)))
+            (cond
+              ((>= n 0) n)
+              ((< n -1) (%tls-await fd n) (loop))
+              (else (error "tls-send failed" (%last-error))))))))
 
     (define (tls-recv ssl buf len)
-      (let ((n (%tls-recv buf ssl len)))
-        (if (< n 0) (error "tls-recv failed" (%last-error)) n)))
+      (let ((fd (%tls-get-fd ssl)))
+        (let loop ()
+          (let ((n (%tls-recv buf ssl len)))
+            (cond
+              ((>= n 0) n)
+              ((< n -1) (%tls-await fd n) (loop))
+              (else (error "tls-recv failed" (%last-error))))))))
 
     (define (tls-close ssl)
       (%tls-close ssl))))

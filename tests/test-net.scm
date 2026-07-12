@@ -1,5 +1,5 @@
 ;; Tests for (kaappi net) — TCP client + TLS client
-(import (scheme base) (scheme write) (kaappi ffi) (kaappi net))
+(import (scheme base) (scheme write) (srfi 18) (kaappi ffi) (kaappi net) (kaappi fibers))
 
 (define pass 0)
 (define fail 0)
@@ -75,6 +75,33 @@
         (check "tls http response" "HTTP/1.1" response))))
 
   (tls-close ssl))
+
+;; --- TLS + fibers: a TLS request must not block sibling fibers
+;; (KEP-0001 Phase 6 acceptance criterion) ---
+(display "=== TLS fiber concurrency ===") (newline)
+
+(let ((ticks 0) (tls-done #f))
+  (define ticker
+    (spawn (lambda ()
+             (let loop ()
+               (unless tls-done
+                 (set! ticks (+ ticks 1))
+                 (thread-sleep! 0.001)
+                 (loop))))))
+  (define worker
+    (spawn (lambda ()
+             (let ((ssl (tls-connect "api.github.com" 443)))
+               (let* ((req "GET / HTTP/1.1\r\nHost: api.github.com\r\nUser-Agent: kaappi-net/1.0\r\nConnection: close\r\n\r\n")
+                      (bv (string->utf8 req)))
+                 (tls-send ssl bv (bytevector-length bv)))
+               (let ((buf (make-bytevector 4096 0)))
+                 (tls-recv ssl buf 4096))
+               (tls-close ssl))
+             (set! tls-done #t))))
+  (fiber-join worker)
+  (fiber-join ticker)
+  (display "  (ticks during TLS request: ") (display ticks) (display ")") (newline)
+  (check "sibling fiber kept ticking during TLS request" #t (> ticks 0)))
 
 (newline)
 (display "=== Results: ")
