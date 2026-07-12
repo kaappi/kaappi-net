@@ -168,6 +168,17 @@ int knet_poll_read(int fd, int timeout_ms) {
     return 1;
 }
 
+/* (int, int) -> int — poll fd for writability
+   Returns 1 if ready, 0 if timeout, -1 on error */
+int knet_poll_write(int fd, int timeout_ms) {
+    struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+    int rc = poll(&pfd, 1, timeout_ms);
+    if (rc < 0) { last_errno = errno; return -1; }
+    if (rc == 0) return 0;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+    return 1;
+}
+
 /* (int) -> int — non-blocking accept, returns fd, -2 for EAGAIN, -1 for error */
 int knet_nb_accept(int listen_fd) {
     int fd = accept(listen_fd, NULL, NULL);

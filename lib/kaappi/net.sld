@@ -3,7 +3,7 @@
   (export tcp-connect tcp-listen tcp-accept
           tcp-send tcp-recv tcp-close tcp-last-error
           tls-connect tls-send tls-recv tls-close
-          set-nonblocking poll-read nb-accept)
+          set-nonblocking poll-read poll-write nb-accept)
   (begin
 
     (define %lib (ffi-open "libkaappi_net"))
@@ -64,6 +64,7 @@
 
     (define %set-nonblocking (ffi-fn %lib "knet_set_nonblocking" '(int) 'int))
     (define %poll-read       (ffi-fn %lib "knet_poll_read" '(int int) 'int))
+    (define %poll-write      (ffi-fn %lib "knet_poll_write" '(int int) 'int))
     (define %nb-accept       (ffi-fn %lib "knet_nb_accept" '(int) 'int))
 
     (define (set-nonblocking fd)
@@ -72,6 +73,9 @@
 
     (define (poll-read fd timeout-ms)
       (%poll-read fd timeout-ms))
+
+    (define (poll-write fd timeout-ms)
+      (%poll-write fd timeout-ms))
 
     (define (nb-accept listen-fd)
       (%nb-accept listen-fd))
