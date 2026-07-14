@@ -71,8 +71,13 @@ int knet_tcp_connect(const char *host, int port, int timeout_ms) {
    TCP Server
    ======================================================================= */
 
-/* (string, int, int) -> int */
-int knet_tcp_listen(const char *host, int port, int backlog) {
+/* Shared listen path. When reuseport is set, also set SO_REUSEPORT so several
+   sockets (typically one per OS thread) can bind the same port — the
+   foundation of http-listen-parallel. On Linux (>=3.9) the kernel then hashes
+   inbound connections across those sockets; on Darwin it does not balance
+   (see research/reuseport-accept-distribution/), which is why the parallel
+   server there falls back to a userspace fd distributor. */
+static int do_tcp_listen(const char *host, int port, int backlog, int reuseport) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
@@ -90,6 +95,10 @@ int knet_tcp_listen(const char *host, int port, int backlog) {
 
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    if (reuseport &&
+        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0) {
+        last_errno = errno; close(fd); freeaddrinfo(res); return -1;
+    }
 
     if (bind(fd, res->ai_addr, res->ai_addrlen) < 0) {
         last_errno = errno; close(fd); freeaddrinfo(res); return -1;
@@ -100,6 +109,30 @@ int knet_tcp_listen(const char *host, int port, int backlog) {
         last_errno = errno; close(fd); return -1;
     }
     return fd;
+}
+
+/* (string, int, int) -> int */
+int knet_tcp_listen(const char *host, int port, int backlog) {
+    return do_tcp_listen(host, port, backlog, 0);
+}
+
+/* (string, int, int) -> int — like knet_tcp_listen but with SO_REUSEPORT. */
+int knet_tcp_listen_reuseport(const char *host, int port, int backlog) {
+    return do_tcp_listen(host, port, backlog, 1);
+}
+
+/* () -> int — 1 if SO_REUSEPORT actually load-balances accepts on this
+   platform, 0 otherwise. Linux (>=3.9) hashes the connection 4-tuple across
+   all sockets sharing the port; Darwin/BSD permit the shared bind but pile
+   every connection onto the last-bound socket (measured in
+   research/reuseport-accept-distribution/). http-listen-parallel uses this to
+   choose the kernel-balanced path vs the userspace fd distributor. */
+int knet_reuseport_balances(void) {
+#ifdef __linux__
+    return 1;
+#else
+    return 0;
+#endif
 }
 
 /* (int) -> int */

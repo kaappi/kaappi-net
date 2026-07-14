@@ -1,6 +1,7 @@
 (define-library (kaappi net)
   (import (scheme base) (kaappi fibers) (kaappi ffi))
-  (export tcp-connect tcp-listen tcp-accept
+  (export tcp-connect tcp-listen tcp-listen-reuseport tcp-accept
+          reuseport-balances?
           tcp-send tcp-recv tcp-close tcp-last-error
           tls-connect tls-send tls-recv tls-close
           set-nonblocking poll-read poll-write nb-accept)
@@ -11,6 +12,8 @@
     ;; TCP
     (define %connect  (ffi-fn %lib "knet_tcp_connect" '(string int int) 'int))
     (define %listen   (ffi-fn %lib "knet_tcp_listen" '(string int int) 'int))
+    (define %listen-reuseport (ffi-fn %lib "knet_tcp_listen_reuseport" '(string int int) 'int))
+    (define %reuseport-balances (ffi-fn %lib "knet_reuseport_balances" '() 'int))
     (define %accept   (ffi-fn %lib "knet_tcp_accept" '(int) 'int))
     (define %send     (ffi-fn %lib "knet_tcp_send" '(pointer pointer long) 'int))
     (define %recv     (ffi-fn %lib "knet_tcp_recv" '(pointer pointer long) 'int))
@@ -41,6 +44,25 @@
           (if (< fd 0)
               (error "tcp-listen failed" host port (%last-error))
               fd))))
+
+    ;; Like tcp-listen but sets SO_REUSEPORT, so several sockets (one per OS
+    ;; thread, typically) can bind the same port. On Linux the kernel then
+    ;; load-balances inbound connections across them; this is the foundation
+    ;; of http-listen-parallel's kernel-balanced path. See
+    ;; research/reuseport-accept-distribution/ for why Darwin needs a
+    ;; userspace fallback instead.
+    (define (tcp-listen-reuseport host port . args)
+      (let ((backlog (if (pair? args) (car args) 128)))
+        (let ((fd (%listen-reuseport host port backlog)))
+          (if (< fd 0)
+              (error "tcp-listen-reuseport failed" host port (%last-error))
+              fd))))
+
+    ;; #t iff SO_REUSEPORT load-balances accepts across sockets on this
+    ;; platform (Linux), #f where it does not (Darwin/BSD). A parallel
+    ;; server uses this to choose the kernel-balanced path vs a userspace
+    ;; fd distributor.
+    (define (reuseport-balances?) (= 1 (%reuseport-balances)))
 
     (define (tcp-accept listen-fd)
       (let ((fd (%accept listen-fd)))
