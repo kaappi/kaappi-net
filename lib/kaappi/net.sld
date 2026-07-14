@@ -92,18 +92,22 @@
     ;; short bounded slice (%tls-poll-timeout-ms), then calls (yield) so
     ;; an already-ready sibling fiber gets a turn before the next attempt.
     ;;
-    ;; (yield), not thread-sleep!, is what makes this safe under
-    ;; concurrent fibers: thread-sleep! always drives the scheduler via a
-    ;; nested runSchedulerStep/runUntil call regardless of the calling
-    ;; fiber's context, so two fibers each retrying through many short
-    ;; waits pile up that many nested native stack frames (each only
-    ;; unwinds once its own timer fires) instead of the flat suspend/
-    ;; resume waitForFd uses for other blocking I/O — under load this
-    ;; shows up as multi-second stalls, not a clean hang. yield sets a
-    ;; flag the *existing* dispatch loop checks, so it returns up through
-    ;; one frame instead of recursing into a new one. Filed as a kaappi
-    ;; core follow-up; until it lands, avoid thread-sleep! in any retry
-    ;; loop a spawned fiber can re-enter many times.
+    ;; (yield) here is a deliberate design choice: yield sets a flag the
+    ;; *existing* dispatch loop checks, so it returns up through one frame
+    ;; instead of recursing into a new one — a flat suspend/resume, the
+    ;; same shape waitForFd uses for other blocking I/O.
+    ;;
+    ;; Historical note: this loop originally used (yield) to work around a
+    ;; core bug where thread-sleep! always drove the scheduler via a nested
+    ;; runSchedulerStep/runUntil call regardless of the calling fiber's
+    ;; context, so two fibers each retrying through many short waits piled
+    ;; up that many nested native stack frames (each only unwinding once
+    ;; its own timer fired) — under load this showed up as multi-second
+    ;; stalls, not a clean hang. That bug was fixed in kaappi core #1463:
+    ;; threadSleepFn now takes the same dispatched-from-scheduler
+    ;; yield-retry path waitForFd uses, so thread-sleep! is no longer
+    ;; dangerous in a retry loop. The (yield) form is kept because yield
+    ;; plus a short poll timeout is just as reasonable a design here.
 
     (define %tls-poll-timeout-ms 1)
 
