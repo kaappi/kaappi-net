@@ -63,6 +63,14 @@
     (define (tcp-last-error) (%last-error))
 
     ;; --- Non-blocking API ---
+    ;;
+    ;; SUPERSEDED (kaappi >= 0.15, KEP-0001 Phase 3, kaappi/kaappi#1441):
+    ;; the core port layer now suspends the calling fiber on EAGAIN via the
+    ;; per-thread reactor, so manual set-nonblocking / poll-read / nb-accept
+    ;; polling loops are no longer the recommended way to multiplex
+    ;; connections — spawn one fiber per connection and let blocking reads
+    ;; and writes park it instead. These helpers remain for compatibility
+    ;; and for code that must run on older kaappi releases.
 
     (define %set-nonblocking (ffi-fn %lib "knet_set_nonblocking" '(int) 'int))
     (define %poll-read       (ffi-fn %lib "knet_poll_read" '(int int) 'int))
