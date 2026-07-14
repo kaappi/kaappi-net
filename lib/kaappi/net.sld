@@ -3,7 +3,8 @@
   (export tcp-connect tcp-listen tcp-accept
           tcp-send tcp-recv tcp-close tcp-last-error
           tls-connect tls-send tls-recv tls-close
-          set-nonblocking poll-read poll-write nb-accept)
+          set-nonblocking poll-read poll-write nb-accept
+          socket-port tcp-connect-port tcp-accept-port)
   (begin
 
     (define %lib (ffi-open "libkaappi_net"))
@@ -61,6 +62,28 @@
         (if (< rc 0) (error "tcp-close failed" (%last-error)) rc)))
 
     (define (tcp-last-error) (%last-error))
+
+    ;; --- Reactor-integrated socket ports (#1478) ---
+    ;;
+    ;; Wrap a connected/accepted socket fd as a Kaappi port (fd->port, from
+    ;; (kaappi ffi)) so its reads and writes go through the fiber I/O reactor:
+    ;; an operation that would block suspends the *calling fiber* on the
+    ;; reactor instead of parking the whole OS thread or spinning a
+    ;; poll-then-sleep loop. Prefer these over raw tcp-recv/tcp-send +
+    ;; poll-read/poll-write for fiber-based servers -- one OS thread then
+    ;; multiplexes many connections on real event-driven wakeup.
+    ;;
+    ;; The returned port OWNS the fd: close-port closes the socket (and wakes
+    ;; any fiber parked on it), so do NOT also tcp-close a socket you have
+    ;; wrapped -- pick one close path. Read/write with the standard port
+    ;; procedures: read-u8/read-bytevector!/write-bytevector/write-u8, etc.
+    (define (socket-port fd) (fd->port fd))
+
+    (define (tcp-connect-port host port . args)
+      (socket-port (apply tcp-connect host port args)))
+
+    (define (tcp-accept-port listen-fd)
+      (socket-port (tcp-accept listen-fd)))
 
     ;; --- Non-blocking API ---
 
